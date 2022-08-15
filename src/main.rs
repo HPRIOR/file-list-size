@@ -1,8 +1,8 @@
 #![allow(dead_code, unused_variables)]
 
 use std::{
-    fs, os,
-    path::{Path, PathBuf},
+    fs,
+    path::PathBuf,
     process::{exit, Command},
 };
 
@@ -66,7 +66,6 @@ impl FileTree {
                     });
                 },
             );
-
 
         for node in &mut self.tree_nodes {
             node.populate(file_paths, depth + 1);
