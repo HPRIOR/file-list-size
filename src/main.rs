@@ -16,17 +16,19 @@ struct File {
 }
 
 #[derive(Debug)]
-struct FileTree {
+struct FileTreeNode {
     files: Vec<File>,
+    file_size: f64,
     dir: Option<String>,
-    tree_nodes: Vec<Box<FileTree>>,
+    tree_nodes: Vec<Box<FileTreeNode>>,
 }
 
-impl FileTree {
+impl FileTreeNode {
     fn new(dir: Option<String>) -> Self {
         Self {
             files: vec![],
             dir,
+            file_size: 0.0,
             tree_nodes: vec![],
         }
     }
@@ -35,44 +37,40 @@ impl FileTree {
         file_paths
             .into_iter()
             .unique_by(|f| f.path_to_file.get(depth))
-            .for_each(
-                |File {
-                     full_path,
-                     path_to_file,
-                     byte_size,
-                 }| {
-                    path_to_file.get(depth).map(|fd| match fd {
-                        path_node if node_is_file(path_to_file, depth) => {
-                            match self.dir.as_ref() {
-                                Some(dir) => {
-                                    if full_path.contains(dir) {
-                                        self.files.push(File {
-                                            full_path: full_path.clone(),
-                                            path_to_file: path_to_file.clone(),
-                                            byte_size: *byte_size,
-                                        })
-                                    }
+            .for_each(|f| {
+                f.path_to_file.get(depth).map(|fd| match fd {
+                    path_node if node_is_file(&f.path_to_file, depth) => {
+                        match self.dir.as_ref() {
+                            Some(dir) => {
+                                if f.full_path.contains(dir) {
+                                    self.add_file_to_node(f)
                                 }
-                                None => self.files.push(File {
-                                    full_path: full_path.clone(),
-                                    path_to_file: path_to_file.clone(),
-                                    byte_size: *byte_size,
-                                }),
-                            };
-                        }
-                        path_node => self
-                            .tree_nodes
-                            .push(Box::new(FileTree::new(Some(path_node.clone())))),
-                    });
-                },
-            );
+                            }
+                            None => self.add_file_to_node(f),
+                        };
+                    }
+                    path_node => self
+                        .tree_nodes
+                        .push(Box::new(FileTreeNode::new(Some(path_node.clone())))),
+                });
+            });
 
         for node in &mut self.tree_nodes {
             node.populate(file_paths, depth + 1);
         }
     }
+
+    fn add_file_to_node(&mut self, file: &File) {
+        self.files.push(File {
+            full_path: file.full_path.clone(),
+            path_to_file: file.path_to_file.clone(),
+            byte_size: file.byte_size,
+        });
+        self.file_size += file.byte_size;
+    }
 }
 
+fn add_file_to_node(node: &mut FileTreeNode, file: &File) {}
 fn node_is_file(path_to_file: &Vec<String>, depth: usize) -> bool {
     let truncated_path = &path_to_file[..=depth];
     let path: PathBuf = truncated_path.iter().collect();
@@ -93,7 +91,7 @@ fn main() {
                 exit_with("No untracked files found")
             }
             let files = get_file_sizes_from(&file_list);
-            let mut tree = FileTree::new(None);
+            let mut tree = FileTreeNode::new(None);
             tree.populate(&files, 0);
             dbg!(tree);
         }
