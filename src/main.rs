@@ -1,104 +1,98 @@
 #![allow(dead_code, unused_variables)]
 
 use std::{
-    fs,
+    collections::{HashMap, HashSet},
+    error::Error,
+    fs::{self, DirEntry, Metadata},
+    os::unix::prelude::MetadataExt,
     path::PathBuf,
     process::{exit, Command},
 };
 
-use itertools::Itertools;
-
 #[derive(Debug)]
 struct File {
-    full_path: String,
-    path_to_file: Vec<String>,
-    byte_size: f64,
+    path: String,
+    byte_size: u64,
 }
 
 #[derive(Debug)]
-struct FileTreeNode {
+struct FileTree {
     files: Vec<File>,
-    file_size: f64,
     dir: Option<String>,
-    tree_nodes: Vec<Box<FileTreeNode>>,
+    nodes: Vec<Box<FileTree>>,
 }
 
-impl FileTreeNode {
-    fn new(dir: Option<String>) -> Self {
-        Self {
-            files: vec![],
-            dir,
-            file_size: 0.0,
-            tree_nodes: vec![],
-        }
-    }
+impl FileTree {
+    fn new(untracked_files: &HashSet<String>, path: &String) -> Option<Self> {
+        let dir_info: Vec<(PathBuf, Metadata)> = fs::read_dir(path)
+            .unwrap()
+            .map(|de| {
+                let path = de.as_ref().unwrap().path();
+                let meta = de.unwrap().metadata().unwrap();
+                (path, meta)
+            })
+            .collect();
 
-    fn populate(&mut self, file_paths: &Vec<File>, depth: usize) {
-        file_paths
-            .into_iter()
-            .unique_by(|f| f.path_to_file.get(depth))
-            .for_each(|f| {
-                f.path_to_file.get(depth).map(|fd| match fd {
-                    path_node if node_is_file(&f.path_to_file, depth) => {
-                        match self.dir.as_ref() {
-                            Some(dir) => {
-                                if f.full_path.contains(dir) {
-                                    self.add_file_to_node(f)
-                                }
-                            }
-                            None => self.add_file_to_node(f),
-                        };
-                    }
-                    path_node => self
-                        .tree_nodes
-                        .push(Box::new(FileTreeNode::new(Some(path_node.clone())))),
-                });
+        let dirs: Vec<String> = dir_info
+            .iter()
+            .filter(|(_, meta)| meta.is_dir())
+            .map(|(p, _)| p.to_str().unwrap().to_owned())
+            .collect();
+
+        let files: Vec<File> = dir_info
+            .iter()
+            .filter(|(_, meta)| meta.is_file())
+            .map(|(pb, meta)| (pb.to_str().unwrap().to_owned(), meta))
+            .filter(|(fp, _)| untracked_files.contains(&fp[2..]))
+            .map(|(fp, meta)| File {
+                path: fp,
+                byte_size: meta.size(),
+            })
+            .collect();
+
+        println!("number of files in {} files: {:?}", path, &files);
+
+
+        if files.len() > 0 || path == "./" {
+            let nodes: Vec<Box<FileTree>> = dirs
+                .into_iter()
+                .filter_map(|dir| FileTree::new(untracked_files, &dir))
+                .map(|ft| Box::new(ft))
+                .collect();
+
+            return Some(Self {
+                files,
+                dir: Some(path.clone()),
+                nodes,
             });
-
-        for node in &mut self.tree_nodes {
-            node.populate(file_paths, depth + 1);
         }
-    }
 
-    fn add_file_to_node(&mut self, file: &File) {
-        self.files.push(File {
-            full_path: file.full_path.clone(),
-            path_to_file: file.path_to_file.clone(),
-            byte_size: file.byte_size,
-        });
-        self.file_size += file.byte_size;
+        None
     }
 }
 
-fn add_file_to_node(node: &mut FileTreeNode, file: &File) {}
-fn node_is_file(path_to_file: &Vec<String>, depth: usize) -> bool {
-    let truncated_path = &path_to_file[..=depth];
-    let path: PathBuf = truncated_path.iter().collect();
-    let metadata = std::fs::metadata(path).unwrap();
-    metadata.is_file()
+fn execute() -> Result<(), Box<dyn Error>> {
+    let cmd = Command::new("sh")
+        .arg("-c")
+        .arg("git ls-files --others --exclude-standard")
+        .output()?;
+
+    let std_out = String::from_utf8(cmd.stdout).unwrap();
+    let file_list = get_file_list_from(&std_out);
+    let file_hash_set: HashSet<String> = file_list.iter().map(|f| f.clone()).collect();
+    let file_tree = FileTree::new(&file_hash_set, &String::from("./"));
+    println!("file tree:");
+    println!("{:?}", file_tree);
+
+    Ok(())
 }
 
 fn main() {
-    let cmd_out = Command::new("sh")
-        .arg("-c")
-        .arg("git ls-files --others --exclude-standard")
-        .output();
-    match cmd_out {
-        Ok(cmd) => {
-            let std_out = String::from_utf8(cmd.stdout).unwrap();
-            let file_list = get_file_list_from(&std_out);
-            if file_list.len() == 0 {
-                exit_with("No untracked files found")
-            }
-            let files = get_file_sizes_from(&file_list);
-            let mut tree = FileTreeNode::new(None);
-            tree.populate(&files, 0);
-            dbg!(tree);
-        }
-        Err(err) => {
-            exit_with(format!("Git command failed: {}", err).as_str());
-        }
-    }
+    let result = execute();
+    match result {
+        Ok(()) => exit(0),
+        Err(err) => exit_with(format!("Git command failed: {}", err).as_str()),
+    };
 }
 
 fn get_file_list_from(std_out: &String) -> Vec<String> {
@@ -106,23 +100,6 @@ fn get_file_list_from(std_out: &String) -> Vec<String> {
         .split("\n")
         .filter(|x| *x != "")
         .map(|x| x.to_owned())
-        .collect()
-}
-
-fn get_file_sizes_from(file_list: &Vec<String>) -> Vec<File> {
-    file_list
-        .iter()
-        .map(|x| {
-            let size = fs::metadata(x).unwrap().len() as f64;
-            File {
-                byte_size: size,
-                path_to_file: x
-                    .split(std::path::MAIN_SEPARATOR)
-                    .map(|s| s.to_owned())
-                    .collect(),
-                full_path: x.clone(),
-            }
-        })
         .collect()
 }
 
