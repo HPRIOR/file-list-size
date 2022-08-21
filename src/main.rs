@@ -1,20 +1,16 @@
-#![allow(dead_code, unused_variables, unused_imports)]
-
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     error::Error,
     fmt::Debug,
-    fs::{self, DirEntry, Metadata},
+    fs,
     hash::Hash,
-    os::{self, unix::prelude::MetadataExt},
-    path::PathBuf,
+    os::unix::prelude::MetadataExt,
     process::{exit, Command},
 };
 
-use concat_string::concat_string;
 use itertools::Itertools;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct File {
     path: String,
     byte_size: u64,
@@ -22,19 +18,35 @@ struct File {
 
 #[derive(Debug)]
 struct FileTree {
-    dir: Option<String>,
+    dir: String,
     files: Vec<File>,
     nodes: Vec<Box<FileTree>>,
+    size: u64,
+}
+
+struct FileTreeInfo {
+    dir: String,
+    files: Vec<File>,
+    size: u64,
+}
+
+impl From<&FileTree> for FileTreeInfo {
+    fn from(file_tree: &FileTree) -> Self {
+        Self {
+            dir: file_tree.dir.clone(),
+            files: file_tree.files.iter().map(|f| f.clone()).collect(),
+            size: file_tree.size.clone(),
+        }
+    }
 }
 
 impl FileTree {
-    fn new_recurse(
+    fn new(
         dir_matrix: &Vec<Vec<String>>,
         target_files: &HashSet<String>,
         h_index: usize,
         w_index: usize,
     ) -> Option<Self> {
-    
         let tree_height = dir_matrix.len();
         let children_index = h_index + 1;
         if children_index > tree_height {
@@ -49,23 +61,48 @@ impl FileTree {
         };
 
         let dir = &dir_matrix[h_index][w_index];
+        let child_nodes: Vec<Box<FileTree>> = children
+            .into_iter()
+            .enumerate()
+            .filter(|(_, ch)| ch.contains(dir))
+            .filter_map(|(i, _)| FileTree::new(dir_matrix, target_files, h_index + 1, i))
+            .map(|ft| Box::new(ft))
+            .collect();
+
+        let files_in_cur_dir = get_files_at_dir(target_files, dir);
+        let size_of_cur_dir = &files_in_cur_dir
+            .iter()
+            .fold(0, |acc, file| acc + file.byte_size);
+        let size_of_children = &child_nodes.iter().fold(0, |acc, tree| acc + tree.size);
 
         Some(Self {
-            dir: Some(dir.clone()),
-            files: vec![],
-            nodes: children
-                .into_iter()
-                .enumerate()
-                .filter(|(_, ch)| dbg!(ch.contains(dir)))
-                .filter_map(|(i, _)| {
-                    FileTree::new_recurse(dir_matrix, target_files, h_index + 1, i)
-                })
-                .map(|ft| Box::new(ft))
-                .collect(),
+            dir: dir.clone(),
+            files: get_files_at_dir(target_files, &dir),
+            nodes: child_nodes,
+            size: size_of_cur_dir + size_of_children,
+        })
+    }
+
+    fn flatten(&self, tree_info: &mut Vec<FileTreeInfo>) {
+        tree_info.push(self.into());
+        self.nodes.iter().for_each(|node| node.flatten(tree_info));
+    }
+
+    fn print(&self) -> () {
+        let mut file_tree_infos: Vec<FileTreeInfo> = vec![];
+        self.flatten(&mut file_tree_infos);
+        let sorted_info = file_tree_infos.iter().sorted_by(|a, b| a.size.cmp(&b.size));
+        sorted_info.for_each(|inf| {
+            let sorted_files = inf
+                .files
+                .iter()
+                .sorted_by(|a, b| a.byte_size.cmp(&b.byte_size));
+            println!("{}: {}", inf.dir, size_str(inf.size as f64));
+            sorted_files
+                .for_each(|f| println!("    - {}: {}", f.path, size_str(f.byte_size as f64)))
         })
     }
 }
-
 
 fn get_dir_hierarchy_matrix(files: &Vec<String>) -> Vec<Vec<String>> {
     let paths: Vec<Vec<String>> = files
@@ -86,7 +123,7 @@ fn get_dir_hierarchy_matrix(files: &Vec<String>) -> Vec<Vec<String>> {
 }
 
 fn get_files_at_dir(untracked_files: &HashSet<String>, dir_path: &String) -> Vec<File> {
-    fs::read_dir(dir_path)
+    fs::read_dir(format!(".{}", dir_path.as_str()))
         .unwrap()
         .map(|de| {
             let path = de.as_ref().unwrap().path();
@@ -129,35 +166,6 @@ fn dir_tree_hierarchy<T: Clone + Eq + Hash>(input: &Vec<Vec<T>>) -> Vec<Vec<T>> 
         .collect()
 }
 
-fn execute() -> Result<(), Box<dyn Error>> {
-    let cmd = Command::new("sh")
-        .arg("-c")
-        .arg("git ls-files --others --exclude-standard")
-        .output()?;
-
-    let std_out = String::from_utf8(cmd.stdout).unwrap();
-    let file_list = get_file_list_from(&std_out);
-    let file_hash_set: HashSet<String> = file_list.iter().map(|f| f.clone()).collect();
-
-    let dir_matrix = get_dir_hierarchy_matrix(&file_list);
-    let file_tree = dbg!(FileTree::new_recurse(&dir_matrix, &file_hash_set, 0, 0));
-
-    //let file_tree = FileTree::new(&file_hash_set, &String::from("./"));
-    // let file_tree = FileTree::new_fast(&file_list);
-    // println!("file tree:");
-    // println!("{:?}", file_tree);
-
-    Ok(())
-}
-
-fn main() {
-    let result = execute();
-    match result {
-        Ok(()) => exit(0),
-        Err(err) => exit_with(format!("Git command failed: {}", err).as_str()),
-    };
-}
-
 fn get_file_list_from(std_out: &String) -> Vec<String> {
     std_out
         .split("\n")
@@ -195,6 +203,32 @@ fn truncate_decimal(s: &String) -> String {
     } else {
         s.clone()
     }
+}
+fn execute() -> Result<(), Box<dyn Error>> {
+    let cmd = Command::new("sh")
+        .arg("-c")
+        .arg("git ls-files --others --exclude-standard")
+        .output()?;
+
+    let std_out = String::from_utf8(cmd.stdout).unwrap();
+    let file_list = get_file_list_from(&std_out);
+    let file_hash_set: HashSet<String> = file_list.iter().map(|f| f.clone()).collect();
+
+    let dir_matrix = get_dir_hierarchy_matrix(&file_list);
+    let file_tree = FileTree::new(&dir_matrix, &file_hash_set, 0, 0);
+    if let Some(file_tree) = file_tree {
+        file_tree.print()
+    }
+
+    Ok(())
+}
+
+fn main() {
+    let result = execute();
+    match result {
+        Ok(()) => exit(0),
+        Err(err) => exit_with(format!("Git command failed: {}", err).as_str()),
+    };
 }
 
 fn exit_with(msg: &str) {
