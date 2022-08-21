@@ -28,78 +28,61 @@ struct FileTree {
 }
 
 impl FileTree {
-    fn new(untracked_files: &HashSet<String>, path: &String) -> Option<Self> {
-        // it works but will overflow if file tree too large. No tail recursion. Also really
-        // innefficient to look through every directory
-        // try another impl that create a tree based on only the untracked files
-        let dir_info: Vec<(PathBuf, Metadata)> = fs::read_dir(path)
-            .unwrap()
-            .map(|de| {
-                let path = de.as_ref().unwrap().path();
-                let meta = de.unwrap().metadata().unwrap();
-                (path, meta)
-            })
-            .collect();
-
-        let dirs: Vec<String> = dir_info
-            .iter()
-            .filter(|(_, meta)| meta.is_dir())
-            .map(|(p, _)| p.to_str().unwrap().to_owned())
-            .collect();
-
-        // recurse until no more sub directories
-        let nodes = if dirs.len() > 0 {
-            dirs.into_iter()
-                .filter_map(|dir| FileTree::new(untracked_files, &dir))
-                .map(|ft| Box::new(ft))
-                .collect()
+    fn new_recurse(
+        dir_matrix: &Vec<Vec<String>>,
+        target_files: &HashSet<String>,
+        h_index: usize,
+        w_index: usize,
+    ) -> Option<Self> {
+    
+        let tree_height = dir_matrix.len();
+        let children_index = h_index + 1;
+        if children_index > tree_height {
+            return None;
+        }
+        // use option instead?
+        let no_children: Vec<String> = Vec::new();
+        let children: &Vec<String> = if children_index == tree_height {
+            &no_children
         } else {
-            vec![]
+            &dir_matrix[h_index + 1]
         };
 
-        let files: Vec<File> = dir_info
-            .iter()
-            .filter(|(_, meta)| meta.is_file())
-            .map(|(pb, meta)| (pb.to_str().unwrap().to_owned(), meta))
-            .filter(|(fp, _)| untracked_files.contains(&fp[2..]))
-            .map(|(fp, meta)| File {
-                path: fp,
-                byte_size: meta.size(),
-            })
-            .collect();
+        let dir = &dir_matrix[h_index][w_index];
 
-        if files.len() > 0 || nodes.len() > 0 || path == "./" {
-            Some(Self {
-                files,
-                dir: Some(path.clone()),
-                nodes,
-            })
-        } else {
-            None
-        }
+        Some(Self {
+            dir: Some(dir.clone()),
+            files: vec![],
+            nodes: children
+                .into_iter()
+                .enumerate()
+                .filter(|(_, ch)| dbg!(ch.contains(dir)))
+                .filter_map(|(i, _)| {
+                    FileTree::new_recurse(dir_matrix, target_files, h_index + 1, i)
+                })
+                .map(|ft| Box::new(ft))
+                .collect(),
+        })
     }
-
-    fn new_fast(files: &Vec<String>) {
-        let paths: Vec<Vec<String>> = files
-            .into_iter()
-            .map(|s| {
-                s.split(std::path::MAIN_SEPARATOR)
-                    .map(|s| s.to_owned())
-                    .scan(String::from(""), |acc, next| {
-                        acc.push(std::path::MAIN_SEPARATOR);
-                        acc.push_str(next.as_str());
-                        Some(acc.to_owned())
-                    })
-                    .collect()
-            })
-            .collect();
+}
 
 
-        let dir_nodes = dir_tree_hierarchy(&paths);
+fn get_dir_hierarchy_matrix(files: &Vec<String>) -> Vec<Vec<String>> {
+    let paths: Vec<Vec<String>> = files
+        .into_iter()
+        .map(|s| {
+            s.split(std::path::MAIN_SEPARATOR)
+                .map(|s| s.to_owned())
+                .scan(String::from(""), |acc, next| {
+                    acc.push(std::path::MAIN_SEPARATOR);
+                    acc.push_str(next.as_str());
+                    Some(acc.to_owned())
+                })
+                .collect()
+        })
+        .collect();
 
-
-
-    }
+    dir_tree_hierarchy(&paths)
 }
 
 fn get_files_at_dir(untracked_files: &HashSet<String>, dir_path: &String) -> Vec<File> {
@@ -155,8 +138,12 @@ fn execute() -> Result<(), Box<dyn Error>> {
     let std_out = String::from_utf8(cmd.stdout).unwrap();
     let file_list = get_file_list_from(&std_out);
     let file_hash_set: HashSet<String> = file_list.iter().map(|f| f.clone()).collect();
+
+    let dir_matrix = get_dir_hierarchy_matrix(&file_list);
+    let file_tree = dbg!(FileTree::new_recurse(&dir_matrix, &file_hash_set, 0, 0));
+
     //let file_tree = FileTree::new(&file_hash_set, &String::from("./"));
-    let file_tree = FileTree::new_fast(&file_list);
+    // let file_tree = FileTree::new_fast(&file_list);
     // println!("file tree:");
     // println!("{:?}", file_tree);
 
